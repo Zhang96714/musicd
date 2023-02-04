@@ -20,23 +20,21 @@ import java.util.stream.Stream;
 
 public class MusicDownloader {
 
-    private static final String urlPre = "https://music.163.com/song/media/outer/url?id=";
     Map<String, String> errMap = new HashMap<>();
-    static Map<String, String> musicNameMap = new HashMap<>();
+
+    static MusicHolder musicHolder=new MusicHolder();
 
     private static final String SAVE_DIR_NAME="\\Music\\musicd";
 
-    public void batchDownload() {
-        if (musicNameMap.isEmpty()) {
+    /**
+     * 批量下载
+     */
+    public void startBatchDownload() {
+        if (musicHolder.isEmpty()) {
             failThrows("未指定 音乐id，无法进行下载。", null);
         }
         File dir = checkDirExist();
-
-        for (String musicId : musicNameMap.keySet()) {
-
-            String u = urlPre + musicId;
-            doDownloadV1(u, dir, musicId);
-        }
+        musicHolder.run(musicMeta -> doDownload(musicMeta,dir));
 
         printErrs();
     }
@@ -46,9 +44,8 @@ public class MusicDownloader {
         if (file.contains("/")) {
             originName = file.substring(file.lastIndexOf("/"));
         }
-        String musicName = musicNameMap.get(musicId);
         String ext=originName.substring(originName.lastIndexOf("."));
-        return musicName +ext;
+        return musicId +ext;
     }
 
     private final CloseableHttpClient httpClient = HttpClients.createDefault();
@@ -56,8 +53,8 @@ public class MusicDownloader {
     /**
      * 使用 httpGet
      */
-    private void doDownloadV1(String url, File dir, String musicId) {
-        System.out.println("url: " + url);
+    private void doDownload(MusicMeta musicMeta, File dir) {
+        System.out.println("musicMeta:"+musicMeta);
 
         RequestConfig requestConfig = RequestConfig
                 .custom()
@@ -67,7 +64,7 @@ public class MusicDownloader {
         HttpGet httpGet = new HttpGet();
         httpGet.setConfig(requestConfig);
         try {
-            httpGet.setURI(new URI(url));
+            httpGet.setURI(new URI(musicMeta.getDownloadUrl()));
         } catch (URISyntaxException e) {
             failThrows("url 格式错误", e);
         }
@@ -87,8 +84,12 @@ public class MusicDownloader {
                 if (pairOptional.isPresent()) {
                     //do save operation
                     InputStream is = response.getEntity().getContent();
-                    String uniqueName = genUniqueName(pairOptional.get().getValue(), musicId);
-                    saveToDisk(is, uniqueName, dir);
+                    String uniqueName = genUniqueName(pairOptional.get().getValue(), musicMeta.getMusicId());
+                    File souceFile=saveToDisk(is, uniqueName, dir);
+                    if(null != souceFile){
+                        //update info
+                        MusicMeta.updateMp3File(souceFile,musicMeta);
+                    }
 
                     //close is
                     try {
@@ -100,7 +101,7 @@ public class MusicDownloader {
             }
 
         } catch (IOException e) {
-            failRecord(musicId, e);
+            failRecord(musicMeta.getMusicId(), e);
         }
 
 
@@ -115,11 +116,11 @@ public class MusicDownloader {
         return dir;
     }
 
-    private void saveToDisk(InputStream inputStream, String uniqueId, File dir) {
+    private File saveToDisk(InputStream inputStream, String uniqueId, File dir) {
         File tmpFile = new File(dir, uniqueId);
         if (tmpFile.exists()) {
             //避免重复下载
-            return;
+            return null;
         }
 
         //close os
@@ -130,6 +131,7 @@ public class MusicDownloader {
             String s = tmpFile.getAbsolutePath();
             failThrows("保存文件失败 " + s, ioException);
         }
+        return tmpFile;
     }
 
     private void copy(InputStream is, OutputStream os) throws IOException {
@@ -167,7 +169,10 @@ public class MusicDownloader {
         }
     }
 
-    public static void prepare() {
+    /**
+     * 准备操作
+     */
+    private static void prepare() {
         String userHome = System.getProperty("user.home");
         String userDir = System.getProperty("user.dir");
 
@@ -181,7 +186,7 @@ public class MusicDownloader {
         }
     }
 
-    public static void prepareMusicUrlData(String text) {
+    private static void prepareMusicUrlData(String text) {
         String configFileName = "music";
         text = text + "\\" + configFileName;
         File file = new File(text);
@@ -195,22 +200,54 @@ public class MusicDownloader {
         Path filePath = Paths.get(file.toURI());
         try {
             List<String> lines = Files.readAllLines(filePath);
-            int i = 1;
-            for (String line : lines
-            ) {
-                String[] data = line.split("@");
-                if (data.length != 2) {
-                    System.err.println("line num:" + i + " 数据不正常。(请先检查)");
+            boolean find=false;
+            //length=10 避免下标越界
+            String[] strings=new String[10];
+            int lineCount=0;
+            for (String line : lines) {
+                if(!find && "".equals(line)){
+                    //跳过空行
                     continue;
                 }
-                String urlString = data[0];
-                String musicName = data[1];
+                if(!find && line.startsWith("https")){
+                    find=true;
+                    lineCount++;
+                    strings[0]=line;
+                    continue;
+                }
+                if(find && "".equals(line)){
+                    //找到一组信息
+                    String musicId=getQueryValue(strings[0]);
+                    musicHolder.addMusic(musicId,strings);
 
-                //null key allow
-                musicNameMap.put(getQueryValue(urlString), musicName);
+                    find=false;
+                    resetArray(strings);
+                }else{
+                    lineCount++;
+                    appendToArray(strings,line);
+                    boolean isLastLine=lines.size() == lineCount;
+                    if(isLastLine){
+                        String musicId=getQueryValue(strings[0]);
+                        musicHolder.addMusic(musicId,strings);
+                    }
+                }
+
             }
         } catch (IOException e) {
             throw new RuntimeException(e);
+        }
+    }
+
+    private static void resetArray(String[] strings){
+        Arrays.fill(strings, null);
+    }
+
+    private static void appendToArray(String[] strings,String s){
+        for (int i = 0; i < strings.length; i++) {
+            if( null == strings[i]){
+                strings[i]=s;
+                break;
+            }
         }
     }
 
@@ -236,6 +273,6 @@ public class MusicDownloader {
     public static void main(String[] args) {
         prepare();
         //开始下载
-        new MusicDownloader().batchDownload();
+        new MusicDownloader().startBatchDownload();
     }
 }
